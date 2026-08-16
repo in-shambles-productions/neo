@@ -27,6 +27,10 @@ contextBridge.exposeInMainWorld('neo', {
   emailDraft: (payload) => ipcRenderer.invoke('email:draft', payload),
   logError: (msg) => ipcRenderer.invoke('log:error', msg),
   importPick: () => ipcRenderer.invoke('import:pick'),
+  importFilesAsChapters: () => ipcRenderer.invoke('import:filesAsChapters'),
+  importFolderAsChapters: () => ipcRenderer.invoke('import:folderAsChapters'),
+  scanScrivener: () => ipcRenderer.invoke('scrivener:scan'),
+  extractScrivener: (scrivPath, plan) => ipcRenderer.invoke('scrivener:extract', scrivPath, plan),
   setSilo: (on) => ipcRenderer.invoke('silo:set', on),
   fullscreenEscape: () => ipcRenderer.invoke('fullscreen:escape'),
 

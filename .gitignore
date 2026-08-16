@@ -6,6 +6,9 @@ dist/
 build/icon-candidates/
 build/icon.png
 
+# private writing samples (Scrivener projects, manuscripts) — never publish
+docs/
+
 # macOS
 .DS_Store
 

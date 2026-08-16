@@ -2042,6 +2042,164 @@ async function importBooks() {
 
 $('#import-btn').onclick = importBooks;
 
+// --- Import files/folders as chapters (one file = one chapter) ---
+const importParasToHtml = (paras) => paras.map((p) =>
+  p.scene ? '<p class="scene-break">***</p>' : `<p>${escHtml(p.text || '')}</p>`
+).join('') || '<p><br></p>';
+
+async function importChapters(result) {
+  const all = (result && result.items) || [];
+  all.filter((it) => it.error).forEach((e) => toast(`Couldn't import ${e.title}: ${e.error}`, 5000));
+  const items = all.filter((it) => !it.error);
+  if (!items.length) return;
+
+  if (book && !$('#editor-view').hidden) {
+    // a book is open → append the files as chapters to it
+    snapshotStructure('import chapters');
+    book.chapterTitles = book.chapterTitles || {};
+    // If the book is just the auto-generated empty first chapter, drop it so the
+    // import starts at Chapter 1 instead of after a blank Chapter 1.
+    if (book.chapterOrder.length === 1) {
+      const only = book.chapterOrder[0];
+      const noBody = !((chapterHTML[only] || '').replace(/<[^>]*>/g, '').replace(/&nbsp;|&#160;/gi, ' ').trim());
+      const noTitle = !((book.chapterTitles[only] || '').trim());
+      if (noBody && noTitle) {
+        if (currentChapterId === only) currentChapterId = null;
+        delete chapterHTML[only];
+        delete book.chapterTitles[only];
+        window.neo.deleteChapter(book.id, only);
+        book.chapterOrder = [];
+      }
+    }
+    for (const it of items) {
+      const chId = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+      chapterHTML[chId] = importParasToHtml(it.paras);
+      book.chapterTitles[chId] = it.title || '';
+      book.chapterOrder.push(chId);
+      await window.neo.writeChapter(book.id, chId, chapterHTML[chId]);
+    }
+    await saveMeta();
+    renderChapters();
+    scheduleReconcile();
+    toast(`Imported ${items.length} chapter${items.length === 1 ? '' : 's'} into “${book.title}”`);
+  } else {
+    // on the bookshelf → make a new book from the files
+    const meta = await window.neo.createBook({ author: displayAuthor() });
+    meta.title = (result && result.folderName) || 'Imported Chapters';
+    meta.chapterTitles = {};
+    meta.tabNames = {
+      notes: (library.tabDefaults && library.tabDefaults.notes) || 'Notes',
+      outline: (library.tabDefaults && library.tabDefaults.outline) || 'Outline'
+    };
+    let words = 0;
+    for (const it of items) {
+      const chId = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+      await window.neo.writeChapter(meta.id, chId, importParasToHtml(it.paras));
+      meta.chapterOrder.push(chId);
+      meta.chapterTitles[chId] = it.title || '';
+      for (const p of it.paras) words += countWords(p.text || '');
+    }
+    meta.wordCount = words;
+    meta.chapterFiles = await window.neo.reconcileChapters(meta.id, meta.chapterOrder, meta.chapterTitles, meta.seriesNumber);
+    await window.neo.writeBookMeta(meta.id, meta);
+    library.shelves[0].bookIds.push(meta.id);
+    await window.neo.writeLibrary(library);
+    window.neo.reconcileBookFolders();
+    if (!$('#bookshelf-view').hidden) renderShelves();
+    toast(`Imported ${items.length} chapter${items.length === 1 ? '' : 's'} into a new book “${meta.title}”`);
+  }
+}
+
+async function importFilesAsChapters() { await importChapters(await window.neo.importFilesAsChapters()); }
+async function importFolderAsChapters() { await importChapters(await window.neo.importFolderAsChapters()); }
+
+// A whole Scrivener project → books, via a preview where you map each part.
+async function importScrivenerProject() {
+  const scan = await window.neo.scanScrivener();
+  if (!scan) return;                                // cancelled at the file picker
+  if (scan.error) { toast(`Couldn't read that Scrivener project: ${scan.error}`, 6000); return; }
+  if (!scan.sections.length) { toast('That project has no documents to import'); return; }
+  const plan = await scrivenerImportModal(scan);
+  if (!plan) return;                                // cancelled at the preview
+  const result = await window.neo.extractScrivener(scan.path, plan);
+  if (result.error) { toast(`Import failed: ${result.error}`, 6000); return; }
+
+  const bookDefs = (result.books || []).filter((b) => b.chapters.length);
+  const noteDocs = result.notes || [];
+  if (!bookDefs.length && !noteDocs.length) { toast('Nothing selected to import'); return; }
+  const notesHtml = noteDocs.length
+    ? noteDocs.map((nd) => `<h3>${escHtml(nd.title)}</h3>${importParasToHtml(nd.paras)}`).join('<hr>')
+    : '';
+  const multi = bookDefs.length > 1;                // a series → auto Book # (1.01, 2.01, …)
+
+  const makeBook = async (title, chapters, seriesNumber) => {
+    const meta = await window.neo.createBook({ author: displayAuthor() });
+    meta.title = title || 'Imported Book';
+    if (seriesNumber) meta.seriesNumber = seriesNumber;
+    meta.chapterTitles = {};
+    meta.tabNames = {
+      notes: (library.tabDefaults && library.tabDefaults.notes) || 'Notes',
+      outline: (library.tabDefaults && library.tabDefaults.outline) || 'Outline'
+    };
+    let words = 0;
+    for (const ch of chapters) {
+      const chId = 'ch-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+      await window.neo.writeChapter(meta.id, chId, importParasToHtml(ch.paras));
+      meta.chapterOrder.push(chId);
+      meta.chapterTitles[chId] = ch.title || '';
+      for (const p of ch.paras) words += countWords(p.text || '');
+    }
+    meta.wordCount = words;
+    meta.chapterFiles = await window.neo.reconcileChapters(meta.id, meta.chapterOrder, meta.chapterTitles, meta.seriesNumber);
+    if (notesHtml) await window.neo.writeAux(meta.id, 'notes', notesHtml);
+    await window.neo.writeBookMeta(meta.id, meta);
+    library.shelves[0].bookIds.push(meta.id);
+  };
+
+  let created = 0;
+  for (let i = 0; i < bookDefs.length; i++) { await makeBook(bookDefs[i].title, bookDefs[i].chapters, multi ? i + 1 : undefined); created++; }
+  if (!bookDefs.length && notesHtml) { await makeBook(scan.title || 'Imported Notes', [], undefined); created++; }
+
+  await window.neo.writeLibrary(library);
+  window.neo.reconcileBookFolders();
+  if (!$('#bookshelf-view').hidden) renderShelves();
+  toast(`Imported ${created} book${created === 1 ? '' : 's'}${noteDocs.length ? ` + ${noteDocs.length} notes` : ''} from “${scan.title}”`, 6000);
+}
+
+// Preview: map each project section to New book / Add to Notes / Skip.
+function scrivenerImportModal(scan) {
+  return new Promise((resolve) => {
+    const bd = document.createElement('div');
+    bd.className = 'modal-backdrop';
+    const rows = scan.sections.map((s, i) => {
+      const book = s.region === 'draft';
+      return `<div style="display:flex;align-items:center;gap:10px;margin:7px 0">
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(s.title)}<span style="color:#999"> · ${s.textCount} doc${s.textCount === 1 ? '' : 's'}</span></span>
+        <select data-i="${i}" style="flex:0 0 140px;padding:4px">
+          <option value="book"${book ? ' selected' : ''}>New book</option>
+          <option value="notes"${book ? '' : ' selected'}>Add to Notes</option>
+          <option value="skip">Skip</option>
+        </select>
+      </div>`;
+    }).join('');
+    bd.innerHTML = `
+      <div class="modal" style="width:540px;max-height:82vh;display:flex;flex-direction:column">
+        <h2 style="font-size:16px">Import from Scrivener</h2>
+        <p style="color:#666;margin:2px 0 4px">“${escHtml(scan.title)}” — choose what each part becomes. Draft folders default to books; everything else to Notes.</p>
+        <div style="overflow:auto;flex:1;padding:2px 2px 6px">${rows}</div>
+        <div style="text-align:right;margin-top:8px">
+          <button class="m-cancel" style="background:none;border:none;color:#888;margin-right:12px">Cancel</button>
+          <button class="fr-choice m-go"><strong>Import</strong></button>
+        </div>
+      </div>`;
+    document.body.appendChild(bd);
+    const done = (v) => { bd.remove(); resolve(v); };
+    bd.querySelector('.m-go').onclick = () => done(scan.sections.map((s, i) => ({ uuid: s.uuid, action: bd.querySelector(`select[data-i="${i}"]`).value })));
+    bd.querySelector('.m-cancel').onclick = () => done(null);
+    bd.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(null); } });
+  });
+}
+
 /* ================================================================== */
 /*  SPELLCHECK PASS + TYPEWRITER SCROLLING                             */
 /* ================================================================== */
@@ -2830,6 +2988,8 @@ window.neo.onMenu(async (msg) => {
   if (msg.type === 'spellcheck') toggleSpellcheck();
   if (msg.type === 'typewriter') toggleTypewriter();
   if (msg.type === 'import') importBooks();
+  if (msg.type === 'importChapters') msg.mode === 'folder' ? importFolderAsChapters() : importFilesAsChapters();
+  if (msg.type === 'importScrivener') importScrivenerProject();
   if (msg.type === 'silo') toggleSilo();
   if (msg.type === 'stats') openStats();
   if (msg.type === 'pageTheme') {

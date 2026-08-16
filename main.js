@@ -7,6 +7,8 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
+app.setName('NEO'); // menu items read "Quit NEO" etc. (the packaged app already carries this)
+
 // ---------------------------------------------------------------------------
 // Library location: a folder of plain files the user can inspect, sync, back up.
 // ---------------------------------------------------------------------------
@@ -506,7 +508,21 @@ const decodeEntities = (s) => s
   .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
   .replace(/&quot;/g, '"').replace(/&apos;/g, "'");
 
-async function importFile(fp) {
+// "Chapter N"-style headings start new chapters; lines of asterisks are scene breaks.
+const isChapterHeading = (t) => /^(chapter|prologue|epilogue|part)\b/i.test(t) && t.length < 60;
+const isSceneBreak = (t) => /^([*#•~]\s*){1,7}$/.test(t);
+
+// Strip a leading ordering token from a filename-derived title ("7.01 Foo" -> "Foo",
+// "Chapter 3 - Bar" -> "Bar"). Files sort by that prefix and NEO numbers chapters itself,
+// so it is noise in the title. Leaves real titles ("1984", "The 39 Steps") untouched.
+function stripOrderingPrefix(name) {
+  const m = String(name).match(/^\s*(?:(?:chapter|chap|ch|part|pt|episode|ep|scene|sc)\b\.?\s*)?\d+(?:[.\-]\d+)*\s*[-–—.:)\]]?\s+(.+)$/i);
+  if (m) { const rest = m[1].trim(); if (/[A-Za-z]/.test(rest)) return rest; }
+  return String(name).trim();
+}
+
+// Read a manuscript file into a flat list of paragraphs ({text}, with pageBreak flags).
+async function readParas(fp) {
   const name = path.basename(fp).replace(/\.[^.]+$/, '');
   const ext = path.extname(fp).toLowerCase();
   let paras = [];
@@ -530,26 +546,39 @@ async function importFile(fp) {
       .map((b) => ({ text: b.replace(/\s*\r?\n\s*/g, ' ').trim(), pageBreak: false }))
       .filter((p) => p.text);
   }
+  return { name, paras };
+}
 
-  // Chapterize: page breaks and "Chapter N"-style headings start new chapters,
-  // lines of asterisks become scene breaks.
-  const isHeading = (t) => /^(chapter|prologue|epilogue|part)\b/i.test(t) && t.length < 60;
-  const isBreak = (t) => /^([*#•~]\s*){1,7}$/.test(t);
+// Whole-manuscript import: split ONE file into multiple chapters.
+async function importFile(fp) {
+  const { name, paras } = await readParas(fp);
   const chapters = [];
   let cur = [];
   for (const p of paras) {
     if (!p.text && !p.pageBreak) continue;
-    if ((p.pageBreak || isHeading(p.text)) && cur.length) {
+    if ((p.pageBreak || isChapterHeading(p.text)) && cur.length) {
       chapters.push(cur);
       cur = [];
     }
-    if (isHeading(p.text)) continue; // the heading line itself becomes the chapter head
-    if (isBreak(p.text)) { cur.push({ scene: true }); continue; }
+    if (isChapterHeading(p.text)) continue; // the heading line itself becomes the chapter head
+    if (isSceneBreak(p.text)) { cur.push({ scene: true }); continue; }
     if (p.text) cur.push({ text: p.text });
   }
   if (cur.length) chapters.push(cur);
   if (!chapters.length) chapters.push([{ text: '' }]);
   return { name, chapters };
+}
+
+// Chapter import: one file becomes exactly ONE chapter (scene breaks preserved).
+async function fileAsChapter(fp) {
+  const { name, paras } = await readParas(fp);
+  const body = [];
+  for (const p of paras) {
+    if (!p.text) continue;
+    if (isSceneBreak(p.text)) body.push({ scene: true });
+    else body.push({ text: p.text });
+  }
+  return { title: stripOrderingPrefix(name), paras: body.length ? body : [{ text: '' }] };
 }
 
 ipcMain.handle('import:pick', async () => {
@@ -570,6 +599,198 @@ ipcMain.handle('import:pick', async () => {
     }
   }
   return out;
+});
+
+// Extensions accepted for "import as chapters".
+const CHAPTER_EXTS = ['docx', 'txt', 'md', 'markdown', 'text'];
+
+// Import picked files as chapters — one chapter per file.
+ipcMain.handle('import:filesAsChapters', async () => {
+  const win = BrowserWindow.getFocusedWindow();
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: 'Import files as chapters',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Text & Word', extensions: CHAPTER_EXTS }]
+  });
+  if (canceled || !filePaths.length) return { items: [] };
+  const items = [];
+  for (const fp of [...filePaths].sort()) {
+    try { items.push(await fileAsChapter(fp)); }
+    catch (err) { logError('import', err); items.push({ title: path.basename(fp), error: String(err.message || err) }); }
+  }
+  return { items };
+});
+
+// Import a folder — every supported file inside (sorted by name) becomes a chapter.
+ipcMain.handle('import:folderAsChapters', async () => {
+  const win = BrowserWindow.getFocusedWindow();
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: 'Import a folder — each file becomes a chapter',
+    properties: ['openDirectory']
+  });
+  if (canceled || !filePaths.length) return { items: [] };
+  const dir = filePaths[0];
+  const names = fs.readdirSync(dir)
+    .filter((n) => !n.startsWith('.') && CHAPTER_EXTS.includes(path.extname(n).toLowerCase().slice(1)))
+    .sort();
+  const items = [];
+  for (const n of names) {
+    try { items.push(await fileAsChapter(path.join(dir, n))); }
+    catch (err) { logError('import', err); items.push({ title: n, error: String(err.message || err) }); }
+  }
+  return { items, folderName: path.basename(dir) };
+});
+
+// ---------------------------------------------------------------------------
+// Scrivener import: parse the .scrivx binder; each document's text is RTF at
+// Files/Data/<UUID>/content.rtf. Draft docs become chapters, the rest Notes.
+// ---------------------------------------------------------------------------
+const CP1252 = { 0x80: '€', 0x82: '‚', 0x83: 'ƒ', 0x84: '„', 0x85: '…',
+  0x86: '†', 0x87: '‡', 0x88: 'ˆ', 0x89: '‰', 0x8A: 'Š', 0x8B: '‹',
+  0x8C: 'Œ', 0x8E: 'Ž', 0x91: '‘', 0x92: '’', 0x93: '“', 0x94: '”',
+  0x95: '•', 0x96: '–', 0x97: '—', 0x98: '˜', 0x99: '™', 0x9A: 'š',
+  0x9B: '›', 0x9C: 'œ', 0x9E: 'ž', 0x9F: 'Ÿ' };
+const cp1252 = (code) => CP1252[code] || String.fromCharCode(code);
+const RTF_SKIP_DEST = new Set(['fonttbl', 'colortbl', 'stylesheet', 'info', 'pict', 'header',
+  'footer', 'expandedcolortbl', 'filetbl', 'listtable', 'listoverridetable', 'rsidtbl',
+  'generator', 'datastore', 'themedata', 'colorschememapping', 'latentstyles', 'fldinst']);
+
+// Cocoa/Scrivener RTF -> plain paragraphs (paragraph break = \par, \line, or \-newline).
+function rtfToParagraphs(rtf) {
+  const paras = [];
+  let cur = '';
+  const stack = [{ skip: false }];
+  const skipping = () => stack.some((g) => g.skip);
+  const flush = () => { const t = cur.replace(/[ \t]+/g, ' ').replace(/ +([.,;:!?])/g, '$1').trim(); if (t) paras.push(t); cur = ''; };
+  const n = rtf.length;
+  let i = 0;
+  while (i < n) {
+    const c = rtf[i];
+    if (c === '{') { stack.push({ skip: false }); i++; continue; }
+    if (c === '}') { if (stack.length > 1) stack.pop(); i++; continue; }
+    if (c === '\\') {
+      const nx = rtf[i + 1];
+      if (nx === "'") { const code = parseInt(rtf.substr(i + 2, 2), 16); if (!skipping()) cur += cp1252(code); i += 4; continue; }
+      if (nx === '\\' || nx === '{' || nx === '}') { if (!skipping()) cur += nx; i += 2; continue; }
+      if (nx === '\n' || nx === '\r') { flush(); i += 2; continue; }
+      if (nx === '~') { if (!skipping()) cur += ' '; i += 2; continue; }
+      if (nx === '*') { stack[stack.length - 1].skip = true; i += 2; continue; }
+      let j = i + 1, word = '';
+      while (j < n && /[a-zA-Z]/.test(rtf[j])) { word += rtf[j]; j++; }
+      let num = '';
+      if (rtf[j] === '-') { num += '-'; j++; }
+      while (j < n && /[0-9]/.test(rtf[j])) { num += rtf[j]; j++; }
+      if (rtf[j] === ' ') j++;
+      if (word === 'par' || word === 'line') flush();
+      else if (word === 'tab') { if (!skipping()) cur += ' '; }
+      else if (word === 'u') {
+        let code = parseInt(num, 10);
+        if (!skipping() && !isNaN(code)) { if (code < 0) code += 65536; cur += String.fromCodePoint(code); }
+        if (rtf[j] && !'\\{}'.includes(rtf[j])) j++;
+      } else if (RTF_SKIP_DEST.has(word)) {
+        stack[stack.length - 1].skip = true;
+      }
+      i = j; continue;
+    }
+    if (c === '\n' || c === '\r') { i++; continue; }
+    if (!skipping()) cur += c;
+    i++;
+  }
+  flush();
+  return paras;
+}
+
+function decodeXmlEntities(s) {
+  return s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(+d))
+    .replace(/&amp;/g, '&');
+}
+
+// Read a Scrivener document's RTF into a {title, paras} chapter (scene breaks kept).
+function scrivDocToChapter(scrivDir, uuid, title) {
+  let paras = [];
+  try {
+    const rtf = fs.readFileSync(path.join(scrivDir, 'Files', 'Data', uuid, 'content.rtf'), 'latin1');
+    paras = rtfToParagraphs(rtf).map((t) => (isSceneBreak(t) ? { scene: true } : { text: t }));
+  } catch { /* empty/missing document */ }
+  return { title: title || 'Untitled', paras: paras.length ? paras : [{ text: '' }] };
+}
+
+// Build the binder as a nested tree of { uuid, type, title, children }.
+function scrivBinderTree(scrivDir) {
+  const scrivx = fs.readdirSync(scrivDir).find((f) => f.toLowerCase().endsWith('.scrivx'));
+  if (!scrivx) throw new Error('Not a Scrivener project (no .scrivx found)');
+  const xml = fs.readFileSync(path.join(scrivDir, scrivx), 'utf8');
+  const b0 = xml.indexOf('<Binder>');
+  const b1 = xml.indexOf('</Binder>');
+  const binder = xml.slice(b0 < 0 ? 0 : b0, b1 < 0 ? xml.length : b1);
+  const root = { children: [] };
+  const stack = [root];
+  const re = /<BinderItem\b([^>]*?)(\/?)>|<\/BinderItem>|<Title>([\s\S]*?)<\/Title>/g;
+  let m;
+  while ((m = re.exec(binder))) {
+    if (m[0] === '</BinderItem>') { if (stack.length > 1) stack.pop(); continue; }
+    if (m[3] !== undefined) { if (stack.length > 1) stack[stack.length - 1].title = decodeXmlEntities(m[3].trim()); continue; }
+    const attrs = m[1] || '';
+    const node = {
+      uuid: (attrs.match(/UUID="([^"]+)"/) || [])[1] || '',
+      type: (attrs.match(/Type="([^"]+)"/) || [])[1] || '',
+      title: '', children: []
+    };
+    stack[stack.length - 1].children.push(node);
+    if (m[2] !== '/') stack.push(node);
+  }
+  return root;
+}
+
+// Every Text descendant of a node, in reading order.
+function scrivTextDocs(node, out) {
+  out = out || [];
+  for (const c of node.children) {
+    if (c.type === 'Text' && c.uuid) out.push(c);
+    if (c.children.length) scrivTextDocs(c, out);
+  }
+  return out;
+}
+
+// Scan a picked project into top-level sections for the import preview (no RTF yet).
+ipcMain.handle('scrivener:scan', async () => {
+  const win = BrowserWindow.getFocusedWindow();
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: 'Import a Scrivener project',
+    properties: ['openFile'],
+    filters: [{ name: 'Scrivener Project', extensions: ['scriv'] }]
+  });
+  if (canceled || !filePaths.length) return null;
+  try {
+    const dir = filePaths[0];
+    const root = scrivBinderTree(dir);
+    const draft = root.children.find((c) => c.type === 'DraftFolder');
+    const sections = [];
+    const add = (c, region) => sections.push({ uuid: c.uuid, title: c.title || 'Untitled', type: c.type, textCount: scrivTextDocs(c).length, region });
+    if (draft) draft.children.forEach((c) => add(c, 'draft'));
+    root.children.forEach((c) => { if (c !== draft && c.type !== 'TrashFolder') add(c, 'other'); });
+    const title = (draft && draft.title) || path.basename(dir).replace(/\.scriv$/i, '');
+    return { path: dir, title, sections: sections.filter((s) => s.textCount > 0) };
+  } catch (err) { logError('import', err); return { error: String(err.message || err) }; }
+});
+
+// Extract the user's plan into books + notes, loading RTF only for chosen sections.
+ipcMain.handle('scrivener:extract', async (_e, scrivDir, plan) => {
+  try {
+    const root = scrivBinderTree(scrivDir);
+    const byUuid = {};
+    (function idx(node) { for (const c of node.children) { if (c.uuid) byUuid[c.uuid] = c; idx(c); } })(root);
+    const books = [], notes = [];
+    for (const p of (plan || [])) {
+      const node = byUuid[p.uuid];
+      if (!node || p.action === 'skip') continue;
+      const docs = scrivTextDocs(node);
+      if (p.action === 'book') books.push({ title: node.title || 'Untitled', chapters: docs.map((d) => scrivDocToChapter(scrivDir, d.uuid, d.title)) });
+      else if (p.action === 'notes') docs.forEach((d) => notes.push(scrivDocToChapter(scrivDir, d.uuid, d.title)));
+    }
+    return { books, notes };
+  } catch (err) { logError('import', err); return { error: String(err.message || err) }; }
 });
 
 // ---------------------------------------------------------------------------
@@ -719,6 +940,9 @@ function buildMenu() {
           accelerator: 'CmdOrCtrl+Shift+I',
           click: () => sendToWindow({ type: 'import' })
         },
+        { label: 'Import Files as Chapters…', click: () => sendToWindow({ type: 'importChapters', mode: 'files' }) },
+        { label: 'Import Folder as Chapters…', click: () => sendToWindow({ type: 'importChapters', mode: 'folder' }) },
+        { label: 'Import Scrivener Project…', click: () => sendToWindow({ type: 'importScrivener' }) },
         { type: 'separator' },
         { role: 'close' }
       ]
