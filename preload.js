@@ -29,6 +29,8 @@ contextBridge.exposeInMainWorld('neo', {
   importPick: () => ipcRenderer.invoke('import:pick'),
   importFilesAsChapters: () => ipcRenderer.invoke('import:filesAsChapters'),
   importFolderAsChapters: () => ipcRenderer.invoke('import:folderAsChapters'),
+  generateCover: (bookId) => ipcRenderer.invoke('cover:generate', bookId),
+  readCover: (bookId) => ipcRenderer.invoke('cover:read', bookId),
   scanScrivener: () => ipcRenderer.invoke('scrivener:scan'),
   extractScrivener: (scrivPath, plan) => ipcRenderer.invoke('scrivener:extract', scrivPath, plan),
   setSilo: (on) => ipcRenderer.invoke('silo:set', on),

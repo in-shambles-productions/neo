@@ -341,6 +341,16 @@ function bookTile(meta) {
     <span class="b-refresh" title="New cover, woven from the current text">&#8635;</span>
     <div class="b-progress" hidden><div></div></div>`;
   el.style.background = coverGradient(meta);
+  if (meta.cover) {
+    window.neo.readCover(meta.id).then((url) => {
+      if (!url) return;
+      el.style.backgroundImage = `url("${url}")`;
+      el.style.backgroundSize = 'cover';
+      el.style.backgroundPosition = 'center';
+      el.querySelector('.b-title').style.display = 'none';
+      el.querySelector('.b-author').style.display = 'none';
+    });
+  }
   // ALL CAPS, with each word's initial slightly larger — classic jacket typography
   const titleEl = el.querySelector('.b-title');
   const inner = document.createElement('span');
@@ -380,10 +390,21 @@ function bookTile(meta) {
   el.addEventListener('contextmenu', async (e) => {
     e.preventDefault();
     const choice = await optionModal(`“${meta.title}”`, null, [
+      { label: 'Create cover ✨', desc: 'AI reads Chapter 1 and paints a cover — a minute or two, all on your Mac.', value: 'cover' },
       { label: 'Set word goal…', desc: 'Adds the subtle progress bar to the cover.', value: 'goal' },
       { label: 'Remove from bookshelf', desc: 'Takes it off your shelves. The files stay safe in your NEO Library folder on disk.', value: 'remove' },
       { label: 'Move to Trash', desc: 'Sends the book folder to your Mac Trash.', danger: true, value: 'trash' }
     ]);
+    if (choice === 'cover') {
+      toast('Reading Chapter 1 and painting a cover… this can take a few minutes, all on your Mac', 12000);
+      const r = await window.neo.generateCover(meta.id);
+      if (r.error) { toast(`Cover failed: ${r.error}`, 6000); return; }
+      meta.cover = true;
+      await window.neo.writeBookMeta(meta.id, meta);
+      renderShelves();
+      toast('Cover created ✨');
+      return;
+    }
     if (choice === 'goal') {
       const goal = await askInput(`Word count goal for “${meta.title}”`, 'e.g. 80000 — blank removes the goal',
         meta.wordGoal ? String(meta.wordGoal) : '');

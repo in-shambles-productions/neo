@@ -794,6 +794,75 @@ ipcMain.handle('scrivener:extract', async (_e, scrivDir, plan) => {
 });
 
 // ---------------------------------------------------------------------------
+// AI cover (experiment): chapter 1 -> local Ollama art prompt -> local mflux.
+// ---------------------------------------------------------------------------
+const OLLAMA_MODEL = 'qwen2.5:7b';
+const MFLUX_BIN = '/Users/jake/apps/youtubify/.venv-mflux/bin/mflux-generate-flux2';
+
+function chapterPlainText(bookId, chapterId, max = 1600) {
+  try {
+    const html = fs.readFileSync(path.join(chaptersDir(bookId), chapterFileName(bookId, chapterId)), 'utf8');
+    return html.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim().slice(0, max);
+  } catch { return ''; }
+}
+
+function ollamaGenerate(prompt) {
+  return new Promise((resolve, reject) => {
+    // keep_alive: 0 unloads the LLM right after, freeing memory before mflux paints.
+    const data = JSON.stringify({ model: OLLAMA_MODEL, prompt, stream: false, keep_alive: 0, options: { temperature: 0.8 } });
+    const req = require('http').request(
+      { hostname: '127.0.0.1', port: 11434, path: '/api/generate', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } },
+      (res) => { let out = ''; res.on('data', (c) => (out += c)); res.on('end', () => { try { resolve((JSON.parse(out).response || '').trim()); } catch (e) { reject(e); } }); }
+    );
+    req.on('error', reject);
+    req.write(data);
+    req.end();
+  });
+}
+
+function mfluxCover(prompt, outPath) {
+  return new Promise((resolve, reject) => {
+    const args = ['--model', 'flux2-klein-4b', '--quantize', '8', '--prompt', prompt,
+      '--width', '832', '--height', '1216', '--steps', '4', '--guidance', '1.0', '--output', outPath];
+    const proc = require('child_process').spawn(MFLUX_BIN, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    proc.stderr.on('data', (d) => (err += d.toString()));
+    proc.on('error', reject);
+    proc.on('close', (code) => (code === 0 && fs.existsSync(outPath) ? resolve(outPath) : reject(new Error('mflux exited ' + code + ': ' + err.slice(-160)))));
+  });
+}
+
+// Read chapter 1, ask the LLM for an art prompt, paint a cover with the title baked in.
+ipcMain.handle('cover:generate', async (_e, bookId) => {
+  try {
+    const meta = bookMeta(bookId);
+    if (!meta) return { error: 'book not found' };
+    const ch0 = (meta.chapterOrder || [])[0];
+    const text = ch0 ? chapterPlainText(bookId, ch0) : '';
+    if (text.length < 40) return { error: 'Chapter 1 is too short to inspire a cover.' };
+    const instructions = 'You are a book-cover art director. Read this opening passage from a novel and write ONE vivid image-generation prompt for its cover. Describe the setting, mood, main subject, and color palette in 2-3 cinematic sentences, illustrated-book-cover style. Do NOT put any text, letters, or words in the image. Reply with ONLY the prompt.';
+    const scene = await ollamaGenerate(`${instructions}\n\nOpening:\n${text}`);
+    if (!scene) return { error: 'the model returned no prompt' };
+    const title = (meta.title && meta.title !== 'Untitled') ? meta.title : '';
+    const typography = title
+      ? ` Portrait book cover illustration, painterly, with the title "${title}" in large elegant serif lettering near the top${meta.author ? ` and "${meta.author}" in small letters near the bottom` : ''}, cohesive cinematic color palette, professional book cover design.`
+      : ' Portrait book cover illustration, painterly, cinematic, professional book cover design.';
+    await mfluxCover(scene + typography, path.join(bookDir(bookId), 'cover.png'));
+    return { ok: true, prompt: scene };
+  } catch (err) { logError('cover', err); return { error: String(err.message || err) }; }
+});
+
+// Current cover as a data URL (resolves the live folder, so it survives renames).
+ipcMain.handle('cover:read', (_e, bookId) => {
+  try {
+    const p = path.join(bookDir(bookId), 'cover.png');
+    return fs.existsSync(p) ? 'data:image/png;base64,' + fs.readFileSync(p).toString('base64') : null;
+  } catch { return null; }
+});
+
+// ---------------------------------------------------------------------------
 // Robustness: error log, daily backups, single instance
 // ---------------------------------------------------------------------------
 const ERROR_LOG = () => path.join(LIBRARY_DIR, 'neo-errors.log');
