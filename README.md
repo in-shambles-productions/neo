@@ -8,4 +8,5 @@ Features added:
 * User readable file names on your disk. Output is:
 
   series book #.chapter # {title of chapter}
+
   e.g. 1.01 The First Chapter.html
