@@ -12,7 +12,7 @@ A fork of [NEO](https://github.com/hughhowey/neo) by Hugh Howey — the same qui
 
 NEO keeps your books as plain files. This fork names them so you — and other apps — can actually use them:
 
-- Book folders become `The Scum Kings — Jake/`, not `book-a8f3d2…`
+- Book folders become `The Mountain Kings — Jake/`, not `book-a8f3d2…`
 - Chapters become `007 - The Dragon.html`, renamed as you retitle or reorder
 - Right-click a chapter → **Reveal in Finder**; deletes go to the Trash, never gone
 
@@ -26,7 +26,7 @@ Give a book its number in a series, and every chapter names itself `series.chapt
 2.01 Book Two Begins.html
 ```
 
-Perfect for scripts, podcasts, or anything that reads ordered files.
+Perfect for anything that reads ordered files.
 
 ### Import from anywhere
 
@@ -35,7 +35,7 @@ Perfect for scripts, podcasts, or anything that reads ordered files.
 
 ### A custom icon
 
-A letterpress drop-cap **N**, generated with a local FLUX model.
+A letterpress drop-cap **N**.
 
 ## Download
 
