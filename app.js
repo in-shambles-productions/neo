@@ -114,6 +114,7 @@ async function loadLibrary() {
     showFirstRun();
   }
   renderShelves();
+  window.neo.reconcileBookFolders(); // migrate legacy book-<id> folders to human "Title - Author" names
 }
 
 function showFirstRun() {
@@ -444,6 +445,7 @@ $('#author-chip').onclick = async () => {
 async function openBook(bookId) {
   book = await window.neo.readBookMeta(bookId);
   if (!book) return;
+  book.chapterFiles = book.chapterFiles || {}; // chapterId -> human-readable filename on disk
   currentChapterId = null; // never carry a chapter reference across books
   undoStack = [];
   chapterHTML = {};
@@ -460,12 +462,14 @@ async function openBook(bookId) {
   $('#tp-title').textContent = book.title === 'Untitled' ? '' : book.title;
   $('#tp-subtitle').textContent = book.subtitle || '';
   $('#tp-author').textContent = book.author || 'Anonymous';
+  $('#tp-booknum').textContent = book.seriesNumber ? String(book.seriesNumber) : '';
   $$('.tab[data-tab="notes"]')[0].textContent = book.tabNames.notes;
   $$('.tab[data-tab="outline"]')[0].textContent = book.tabNames.outline;
 
   renderChapters();
   renderStickies();
   updateCounters();
+  reconcileFiles(); // migrate legacy names + refresh .md mirrors (async, non-blocking)
 
   // Plotters land in the outline for a brand-new book
   const isNew = book.chapterOrder.length === 0;
@@ -527,6 +531,7 @@ function renderChapters() {
     titleSpan.addEventListener('blur', () => {
       book.chapterTitles[chId] = titleSpan.textContent.trim();
       scheduleMetaSave();
+      scheduleReconcile(); // rename the file to match the new chapter title
       renderNav();
     });
     head.appendChild(num);
@@ -575,9 +580,13 @@ async function chapterMenu(chId, index) {
   const choice = await optionModal(
     `Chapter ${index + 1}`,
     words ? `${words.toLocaleString()} words.` : 'This chapter is empty.',
-    [{ label: 'Delete chapter', desc: words ? 'Its words move to Darlings, recoverable anytime.' : 'Nothing to save — it just goes.', danger: true, value: 'delete' }]
+    [
+      { label: 'Reveal in Finder', desc: 'Show this chapter’s file on disk.', value: 'reveal' },
+      { label: 'Delete chapter', desc: words ? 'Its words move to Darlings, recoverable anytime.' : 'Nothing to save — it just goes.', danger: true, value: 'delete' }
+    ]
   );
-  if (choice === 'delete') await deleteChapterToDarlings(chId);
+  if (choice === 'reveal') await window.neo.revealChapter(book.id, chId);
+  else if (choice === 'delete') await deleteChapterToDarlings(chId);
 }
 
 /* ================================================================== */
@@ -764,6 +773,7 @@ function smartKeys(e, body) {
 // Title page: Enter drops you into Chapter One.
 $('#tp-title').addEventListener('keydown', titleEnter);
 $('#tp-subtitle').addEventListener('keydown', titleEnter);
+$('#tp-booknum').addEventListener('keydown', titleEnter);
 function titleEnter(e) {
   if (e.key !== 'Enter') return;
   e.preventDefault();
@@ -780,6 +790,16 @@ $('#tp-title').addEventListener('input', () => {
 $('#tp-subtitle').addEventListener('input', () => {
   book.subtitle = $('#tp-subtitle').textContent.trim();
   scheduleMetaSave();
+});
+// Book # in the series doubles as the "season" in chapter filenames (7.01, 7.02…).
+$('#tp-booknum').addEventListener('input', () => {
+  const n = parseInt($('#tp-booknum').textContent.replace(/[^0-9]/g, ''), 10);
+  book.seriesNumber = Number.isFinite(n) && n > 0 ? n : undefined;
+  scheduleMetaSave();
+  scheduleReconcile(); // renumber the files to match the new book/season number
+});
+$('#tp-booknum').addEventListener('blur', () => {
+  $('#tp-booknum').textContent = book.seriesNumber ? String(book.seriesNumber) : '';
 });
 
 // Global editor shortcuts
@@ -817,6 +837,7 @@ function createChapterAt(idx) {
   window.neo.writeChapter(book.id, chId, chapterHTML[chId]);
   saveMeta();
   renderChapters();
+  scheduleReconcile();
   return chId;
 }
 
@@ -839,6 +860,7 @@ async function deleteChapterQuiet(chId) {
   await saveMeta();
   renderChapters();
   renderStickies();
+  scheduleReconcile();
 }
 
 function focusChapter(chId) {
@@ -1069,6 +1091,7 @@ navList.addEventListener('drop', async (e) => {
   book.chapterOrder.splice(index, 0, chId);
   await saveMeta();
   renderChapters(); // renumbers heads and rebuilds the nav
+  scheduleReconcile(); // renumber the files on disk to match the new order
   if (currentTab === 'outline') renderOutline();
   toast('Chapters reordered — ⌘Z to undo');
 });
@@ -1699,6 +1722,21 @@ async function saveMeta() {
   if (book) await window.neo.writeBookMeta(book.id, book);
 }
 
+// Keep on-disk filenames (and their .md mirrors) matching chapter order + titles.
+// Renames are invisible to the UI (which keys chapters by id); only files change.
+async function reconcileFiles() {
+  if (!book) return;
+  try {
+    const map = await window.neo.reconcileChapters(book.id, book.chapterOrder, book.chapterTitles || {}, book.seriesNumber);
+    if (map) { book.chapterFiles = map; await saveMeta(); }
+  } catch (e) { /* non-fatal: filenames just stay as they are */ }
+}
+let reconcileTimer = null;
+function scheduleReconcile() {
+  clearTimeout(reconcileTimer);
+  reconcileTimer = setTimeout(reconcileFiles, 600);
+}
+
 function flushAllSaves() {
   if (!book) return;
   // remember where the writer was for next time
@@ -1775,6 +1813,7 @@ async function structuralUndo() {
   currentChapterId = book.chapterOrder.includes(currentChapterId) ? currentChapterId : null;
   renderChapters();
   renderStickies();
+  scheduleReconcile(); // restore filenames to match the reverted order/titles
   if (currentTab === 'darlings') renderDarlings();
   if (currentTab === 'outline') renderOutline();
   updateCounters();
@@ -1991,6 +2030,7 @@ async function importBooks() {
       for (const p of ch) words += countWords(p.text || '');
     }
     meta.wordCount = words;
+    meta.chapterFiles = await window.neo.reconcileChapters(meta.id, meta.chapterOrder, meta.chapterTitles || {}, meta.seriesNumber);
     await window.neo.writeBookMeta(meta.id, meta);
     library.shelves[0].bookIds.push(meta.id);
     ok++;

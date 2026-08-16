@@ -196,6 +196,7 @@ body.night {
 body.night .sheet, body.night #aux-paper { box-shadow: 0 4px 30px rgba(0,0,0,0.7); border: 1px solid #2e2d2b; }
 body.night .chapter-head, body.night #aux-paper h2 { color: #918b7d; }
 body.night #tp-subtitle { color: #a09a8c; }
+body.night #tp-booknum { color: #979183; }
 body.night #tp-author { color: #918b7d; }
 body.night .chapter-body p.scene-break { color: #7d7768; }
 body.night .chapter-body p.ghost { color: #6f6a5e; }
@@ -256,6 +257,11 @@ body.night .ol-hint { color: #5f5b52; }
   font-family: Georgia, serif; font-size: 17px; font-style: italic;
   color: #555; margin-top: 14px; outline: none; min-height: 24px;
 }
+#tp-booknum {
+  font-family: Georgia, serif; font-size: 15px; font-style: italic;
+  color: #6a6458; margin-top: 10px; outline: none; min-height: 22px;
+}
+#tp-booknum:not(:empty)::before { content: "Book "; } /* reads "Book 7"; the number is what you edit */
 #tp-author {
   margin-top: 46px; font-size: 14px; letter-spacing: 3px;
   text-transform: uppercase; color: #444;

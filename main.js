@@ -2,7 +2,7 @@
 // Owns the window and all file-system access. The renderer talks to this
 // through the IPC handlers below (see preload.js for the exposed API).
 
-const { app, BrowserWindow, ipcMain, dialog, Menu, MenuItem } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, MenuItem, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -27,7 +27,79 @@ function ensureLibrary() {
 }
 
 function bookDir(bookId) {
-  return path.join(LIBRARY_DIR, bookId);
+  return path.join(LIBRARY_DIR, bookFolderName(bookId));
+}
+
+// ---------------------------------------------------------------------------
+// Human-readable book folders. A book keeps its stable id, but on disk it lives
+// in a "Title - Author" folder. A small main-owned index maps id -> folder,
+// kept out of library.json so the renderer's library writes can't clobber it.
+//   .bookfolders.json: { "book-abc": "The Scum Kings - Jake" }
+// ---------------------------------------------------------------------------
+const BOOK_FOLDERS_FILE = path.join(LIBRARY_DIR, '.bookfolders.json');
+let _bfCache = { mtimeMs: -1, data: {} };
+
+function readBookFolders() {
+  try {
+    const st = fs.statSync(BOOK_FOLDERS_FILE);
+    if (st.mtimeMs !== _bfCache.mtimeMs) {
+      _bfCache = { mtimeMs: st.mtimeMs, data: readJSON(BOOK_FOLDERS_FILE, {}) || {} };
+    }
+    return _bfCache.data;
+  } catch { return {}; }
+}
+
+function writeBookFolders(map) {
+  ensureLibrary();
+  writeJSON(BOOK_FOLDERS_FILE, map);
+  try { _bfCache = { mtimeMs: fs.statSync(BOOK_FOLDERS_FILE).mtimeMs, data: map }; } catch { /* ignore */ }
+}
+
+// Current on-disk folder for a book; unmapped (legacy) books fall back to the id.
+function bookFolderName(bookId) {
+  const map = readBookFolders();
+  return map[bookId] || bookId;
+}
+
+// "Title - Author", filesystem-safe (safeBase(), defined below, strips illegal chars).
+function bookFolderBase(meta) {
+  const title = safeBase(meta && meta.title) || 'Untitled';
+  const author = safeBase(meta && meta.author);
+  let s = author ? `${title} - ${author}` : title;
+  if (s.length > 120) s = s.slice(0, 120).trim();
+  return s;
+}
+
+// Two-phase directory rename so a name-swap can't clobber.
+function applyFolderRenames(root, plan) {
+  const staged = [];
+  plan.forEach((r, k) => {
+    if (r.from === r.to || !fs.existsSync(path.join(root, r.from))) return;
+    const tmp = path.join(root, `.neo-book-tmp-${k}`);
+    fs.renameSync(path.join(root, r.from), tmp);
+    staged.push({ tmp, to: path.join(root, r.to) });
+  });
+  staged.forEach((s) => { if (!fs.existsSync(s.to)) fs.renameSync(s.tmp, s.to); });
+}
+
+// Rename one book's folder to match its title/author, updating the index.
+// A no-op (no disk write) when the folder is already correctly named.
+function reconcileOneBookFolder(meta) {
+  if (!meta || !meta.id) return;
+  const map = readBookFolders();
+  const curFolder = map[meta.id] || meta.id;
+  const base = bookFolderBase(meta);
+  const taken = new Set(
+    Object.keys(map).filter((k) => k !== meta.id).map((k) => String(map[k]).toLowerCase())
+  );
+  let name = base, n = 2;
+  while (taken.has(name.toLowerCase())) name = `${base} (${n++})`;
+  if (name === curFolder && map[meta.id]) return;
+  if (name !== curFolder && fs.existsSync(path.join(LIBRARY_DIR, curFolder))
+      && !fs.existsSync(path.join(LIBRARY_DIR, name))) {
+    fs.renameSync(path.join(LIBRARY_DIR, curFolder), path.join(LIBRARY_DIR, name));
+  }
+  writeBookFolders({ ...map, [meta.id]: name });
 }
 
 function readJSON(file, fallback) {
@@ -82,6 +154,7 @@ ipcMain.handle('book:create', (_e, meta) => {
   fs.writeFileSync(path.join(dir, 'outline.html'), '');
   writeJSON(path.join(dir, 'darlings.json'), []);
   writeJSON(path.join(dir, 'stickies.json'), []);
+  reconcileOneBookFolder(book); // name the folder "Untitled - Author" from the start
   return book;
 });
 
@@ -92,28 +165,164 @@ ipcMain.handle('book:readMeta', (_e, bookId) => {
 ipcMain.handle('book:writeMeta', (_e, bookId, meta) => {
   meta.modified = new Date().toISOString();
   writeJSON(path.join(bookDir(bookId), 'book.json'), meta);
+  reconcileOneBookFolder(meta); // keep the folder name matching the title
   return true;
 });
 
+// Normalize every book folder on disk to its human name (startup migration).
+// Rebuilt from a scan, so it self-heals and drops entries for deleted books.
+ipcMain.handle('books:reconcileFolders', () => {
+  ensureLibrary();
+  let entries;
+  try { entries = fs.readdirSync(LIBRARY_DIR, { withFileTypes: true }); }
+  catch { return {}; }
+  const skip = new Set(['Backups', 'Exports']);
+  const books = [];
+  for (const d of entries) {
+    if (!d.isDirectory() || d.name.startsWith('.') || skip.has(d.name)) continue;
+    const meta = readJSON(path.join(LIBRARY_DIR, d.name, 'book.json'), null);
+    if (meta && meta.id) books.push({ id: meta.id, curFolder: d.name, meta });
+  }
+  const map = {};
+  const taken = new Set();
+  const plan = [];
+  for (const b of books) {
+    const base = bookFolderBase(b.meta);
+    let name = base, n = 2;
+    while (taken.has(name.toLowerCase())) name = `${base} (${n++})`;
+    taken.add(name.toLowerCase());
+    map[b.id] = name;
+    if (name !== b.curFolder) plan.push({ from: b.curFolder, to: name });
+  }
+  applyFolderRenames(LIBRARY_DIR, plan);
+  writeBookFolders(map);
+  return map;
+});
+
+// ---------------------------------------------------------------------------
+// First-class files: chapters live on disk under human-readable names, so the
+// chapters folder is a clean, Finder-native set of files other tools can read
+// directly — no export step. NEO still keys chapters by a stable internal id;
+// this layer just maps that id to a pretty filename.
+//   book.json.chapterFiles: { [chapterId]: "007 - The Dragon.html" }
+// ---------------------------------------------------------------------------
+function chaptersDir(bookId) {
+  return path.join(bookDir(bookId), 'chapters');
+}
+
+function bookMeta(bookId) {
+  return readJSON(path.join(bookDir(bookId), 'book.json'), null);
+}
+
+// Current on-disk filename for a chapter (legacy books fall back to id.html).
+function chapterFileName(bookId, chapterId) {
+  const meta = bookMeta(bookId);
+  const map = (meta && meta.chapterFiles) || {};
+  return map[chapterId] || (chapterId + '.html');
+}
+
+// A filesystem-safe, human-readable base derived from a chapter title.
+function safeBase(name) {
+  let s = (name == null ? '' : String(name));
+  s = s.replace(/[\/:]/g, ' ');       // '/' and ':' are illegal in macOS/Finder names
+  s = s.replace(/[\x00-\x1f]/g, ' '); // control characters
+  s = s.replace(/\s+/g, ' ').trim();
+  s = s.replace(/^\.+/, '').replace(/[ .]+$/, ''); // no leading dots, no trailing dot/space
+  if (s.length > 80) s = s.slice(0, 80).trim();
+  return s;
+}
+
+// Desired filename base (no extension) for the chapter at 0-based index i.
+// A numeric prefix keeps Finder's sort matching NEO's order and stays unique
+// even when two chapters share a title. When the book has a series number
+// (its "Book #"), chapters are named "{book}.{episode} Title" — e.g. a Book 7
+// gives "7.01 Title", "7.02 Title" — matching a podcast season.episode scheme.
+function chapterBase(i, title, seriesNumber) {
+  const t = safeBase(title);
+  const season = Number(seriesNumber);
+  if (Number.isFinite(season) && season > 0) {
+    const ep = String(i + 1).padStart(2, '0');
+    return t ? `${season}.${ep} ${t}` : `${season}.${ep}`;
+  }
+  const prefix = String(i + 1).padStart(3, '0');
+  return t ? `${prefix} - ${t}` : `${prefix} - Chapter ${i + 1}`;
+}
+
+// Pure: desired rename plan + resulting id->file map. The executor below makes
+// it collision-safe, so this only states intent.
+function planReconcile(order, titles, existing, seriesNumber) {
+  existing = existing || {};
+  titles = titles || {};
+  const newMap = {};
+  const renames = [];
+  order.forEach((id, i) => {
+    const to = chapterBase(i, titles[id], seriesNumber) + '.html';
+    const from = existing[id] || (id + '.html');
+    newMap[id] = to;
+    if (from !== to) renames.push({ id, from, to });
+  });
+  return { renames, newMap };
+}
+
+// Two-phase rename so an order-swap can't clobber: stage each source under a
+// unique temp name, then move every temp into place.
+function applyRenames(dir, renames) {
+  const staged = [];
+  renames.forEach((r, k) => {
+    const tmp = path.join(dir, `.neo-reconcile-${k}.html`);
+    const has = fs.existsSync(path.join(dir, r.from));
+    if (has) fs.renameSync(path.join(dir, r.from), tmp);
+    staged.push({ tmp, has, to: r.to });
+  });
+  staged.forEach((s) => {
+    if (s.has) fs.renameSync(s.tmp, path.join(dir, s.to));
+  });
+}
+
 ipcMain.handle('chapter:read', (_e, bookId, chapterId) => {
-  const file = path.join(bookDir(bookId), 'chapters', chapterId + '.html');
   try {
-    return fs.readFileSync(file, 'utf8');
+    return fs.readFileSync(path.join(chaptersDir(bookId), chapterFileName(bookId, chapterId)), 'utf8');
   } catch {
     return '';
   }
 });
 
 ipcMain.handle('chapter:write', (_e, bookId, chapterId, html) => {
-  const dir = path.join(bookDir(bookId), 'chapters');
+  const dir = chaptersDir(bookId);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, chapterId + '.html'), html);
+  fs.writeFileSync(path.join(dir, chapterFileName(bookId, chapterId)), html);
   return true;
 });
 
-ipcMain.handle('chapter:delete', (_e, bookId, chapterId) => {
-  const file = path.join(bookDir(bookId), 'chapters', chapterId + '.html');
-  if (fs.existsSync(file)) fs.unlinkSync(file);
+ipcMain.handle('chapter:delete', async (_e, bookId, chapterId) => {
+  const p = path.join(chaptersDir(bookId), chapterFileName(bookId, chapterId));
+  if (fs.existsSync(p)) {
+    try { await shell.trashItem(p); }   // recoverable from Finder's Trash — words are never lost
+    catch { try { fs.unlinkSync(p); } catch { /* already gone */ } }
+  }
+  return true;
+});
+
+// Make the chapters folder match NEO's order + titles: rename files to
+// human-readable names. Returns the new id->file map for the renderer to
+// persist in book.json.
+ipcMain.handle('chapters:reconcile', (_e, bookId, order, titles, seriesNumber) => {
+  const dir = chaptersDir(bookId);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const meta = bookMeta(bookId);
+  const existing = (meta && meta.chapterFiles) || {};
+  const { renames, newMap } = planReconcile(order || [], titles || {}, existing, seriesNumber);
+  applyRenames(dir, renames);
+  return newMap;
+});
+
+// Reveal a chapter's file in Finder (falls back to the folder) — the file
+// another app can pick up directly.
+ipcMain.handle('chapter:reveal', (_e, bookId, chapterId) => {
+  const dir = chaptersDir(bookId);
+  const p = path.join(dir, chapterFileName(bookId, chapterId));
+  if (fs.existsSync(p)) { shell.showItemInFolder(p); return true; }
+  if (fs.existsSync(dir)) shell.showItemInFolder(dir);
   return true;
 });
 
@@ -152,8 +361,9 @@ ipcMain.handle('book:delete', async (_e, bookId, title) => {
     detail: 'The book folder will go to your Mac Trash, so you can recover it.'
   });
   if (response === 1) {
-    const { shell } = require('electron');
     await shell.trashItem(bookDir(bookId));
+    const map = readBookFolders();
+    if (map[bookId]) { const next = { ...map }; delete next[bookId]; writeBookFolders(next); }
     return true;
   }
   return false;

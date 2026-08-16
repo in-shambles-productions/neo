@@ -9,10 +9,13 @@ contextBridge.exposeInMainWorld('neo', {
   readBookMeta: (bookId) => ipcRenderer.invoke('book:readMeta', bookId),
   writeBookMeta: (bookId, meta) => ipcRenderer.invoke('book:writeMeta', bookId, meta),
   deleteBook: (bookId, title) => ipcRenderer.invoke('book:delete', bookId, title),
+  reconcileBookFolders: () => ipcRenderer.invoke('books:reconcileFolders'),
 
   readChapter: (bookId, chId) => ipcRenderer.invoke('chapter:read', bookId, chId),
   writeChapter: (bookId, chId, html) => ipcRenderer.invoke('chapter:write', bookId, chId, html),
   deleteChapter: (bookId, chId) => ipcRenderer.invoke('chapter:delete', bookId, chId),
+  reconcileChapters: (bookId, order, titles, seriesNumber) => ipcRenderer.invoke('chapters:reconcile', bookId, order, titles, seriesNumber),
+  revealChapter: (bookId, chId) => ipcRenderer.invoke('chapter:reveal', bookId, chId),
 
   readAux: (bookId, name) => ipcRenderer.invoke('aux:read', bookId, name),
   writeAux: (bookId, name, html) => ipcRenderer.invoke('aux:write', bookId, name, html),
