@@ -487,6 +487,9 @@ async function openBook(bookId) {
   $$('.tab[data-tab="notes"]')[0].textContent = book.tabNames.notes;
   $$('.tab[data-tab="outline"]')[0].textContent = book.tabNames.outline;
 
+  // Heal legacy titles that redundantly repeat NEO's own chapter number, then
+  // let reconcileFiles() below rename the files to match the cleaned titles.
+  if (dedupeChapterTitles()) await saveMeta();
   renderChapters();
   renderStickies();
   updateCounters();
@@ -1743,6 +1746,35 @@ async function saveMeta() {
   if (book) await window.neo.writeBookMeta(book.id, book);
 }
 
+// The ordinal NEO prepends to a chapter's on-disk filename at position i —
+// "7.09" for a Book #7's 9th chapter, or "009" for a book with no Book #.
+function neoOrdinal(i, seriesNumber) {
+  const s = Number(seriesNumber);
+  return (Number.isFinite(s) && s > 0)
+    ? s + '.' + String(i + 1).padStart(2, '0')
+    : String(i + 1).padStart(3, '0');
+}
+
+// One-time heal for chapters imported before ordering prefixes were stripped
+// (notably Scrivener binder titles): if a stored title begins with the very
+// number NEO adds for that chapter's position — e.g. title "7.09 Foo" sitting at
+// chapter 7.09 — drop the redundant prefix so it isn't shown twice and can't
+// double the filename. Deliberately narrow: it removes only NEO's own ordinal,
+// so genuine titles like "3 Body Problem" or "1984" are never altered. Returns
+// true if any title changed.
+function dedupeChapterTitles() {
+  if (!book || !book.chapterTitles) return false;
+  let changed = false;
+  book.chapterOrder.forEach((chId, i) => {
+    const t = (book.chapterTitles[chId] || '').trim();
+    if (!t) return;
+    const esc = neoOrdinal(i, book.seriesNumber).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = t.match(new RegExp('^' + esc + '\\s*[-–—.:)\\]]?\\s+(.+)$'));
+    if (m && /[A-Za-z]/.test(m[1])) { book.chapterTitles[chId] = m[1].trim(); changed = true; }
+  });
+  return changed;
+}
+
 // Keep on-disk filenames (and their .md mirrors) matching chapter order + titles.
 // Renames are invisible to the UI (which keys chapters by id); only files change.
 async function reconcileFiles() {
@@ -2426,8 +2458,19 @@ function statsChartSvg() {
   </div>`;
 }
 
-function openStats() {
+// Move the library to a user-chosen folder (see main: library:pick). Keeping the
+// library outside ~/Documents is what stops macOS' repeated access prompts.
+async function pickLibraryLocation() {
+  const res = await window.neo.pickLibrary();
+  if (!res || res.canceled) return;
+  if (res.error) { toast(`Couldn’t move the library: ${res.error}`, 6000); return; }
+  if (res.unchanged) { toast('The library is already there'); return; }
+  toast(`Library moved to ${res.path} — macOS won’t ask for access there`, 6000);
+}
+
+async function openStats() {
   const hasBook = !!book;
+  const libPath = await window.neo.libraryPath();
   const today = hasBook ? (book.dailyCounts || {})[todayStr()] : null;
   const wordsToday = today ? today.end - today.start : 0;
   const total = hasBook ? bookWordCount() : 0;
@@ -2461,6 +2504,13 @@ function openStats() {
           </select>
         </label>
       </div>
+      <div class="stats-row" style="align-items:flex-start;gap:10px">
+        <label style="flex:1">Library folder
+          <div id="st-libpath" class="soft" style="font-size:12px;margin-top:3px;word-break:break-all">${escHtml(libPath)}</div>
+        </label>
+        <button id="st-lib-show">Show in Finder</button>
+        <button id="st-lib-move">Move…</button>
+      </div>
       <div style="text-align:right;margin-top:14px">
         <button class="m-ok" style="background:var(--accent);border:none;border-radius:6px;padding:7px 18px;color:#191919">Done</button>
       </div>
@@ -2478,6 +2528,8 @@ function openStats() {
     if (hasBook) updateCounters();
   };
   bd.querySelector('.m-ok').onclick = close;
+  bd.querySelector('#st-lib-show').onclick = () => window.neo.revealLibrary();
+  bd.querySelector('#st-lib-move').onclick = async () => { await close(); await pickLibraryLocation(); };
   bd.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
   if (hasBook) {
     bd.querySelector('#st-sprint-btn').onclick = () => {
@@ -3013,6 +3065,7 @@ window.neo.onMenu(async (msg) => {
   if (msg.type === 'importScrivener') importScrivenerProject();
   if (msg.type === 'silo') toggleSilo();
   if (msg.type === 'stats') openStats();
+  if (msg.type === 'libraryLocation') pickLibraryLocation();
   if (msg.type === 'pageTheme') {
     library.pageTheme = msg.value;
     await window.neo.writeLibrary(library);

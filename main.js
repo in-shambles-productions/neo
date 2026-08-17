@@ -12,8 +12,28 @@ app.setName('NEO'); // menu items read "Quit NEO" etc. (the packaged app already
 // ---------------------------------------------------------------------------
 // Library location: a folder of plain files the user can inspect, sync, back up.
 // ---------------------------------------------------------------------------
-const LIBRARY_DIR = path.join(os.homedir(), 'Documents', 'NEO Library');
-const LIBRARY_FILE = path.join(LIBRARY_DIR, 'library.json');
+// The library path is user-configurable (File → Library Location…). The choice
+// is remembered in a tiny config file under userData — which is never in a
+// TCC-protected place like ~/Documents — so an unsigned/ad-hoc build can read it
+// with no macOS permission prompt, even before the library itself is reachable.
+// Keeping the library out of Documents/Desktop/Downloads avoids those prompts.
+const CONFIG_FILE = path.join(app.getPath('userData'), 'neo-config.json');
+const DEFAULT_LIBRARY_DIR = path.join(os.homedir(), 'Documents', 'NEO Library');
+
+function readConfig() {
+  try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) || {}; } catch { return {}; }
+}
+function writeConfig(patch) {
+  const cfg = { ...readConfig(), ...patch };
+  try {
+    fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true });
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+  } catch (err) { logError('config', err); }
+  return cfg;
+}
+
+let LIBRARY_DIR = readConfig().libraryDir || DEFAULT_LIBRARY_DIR;
+let LIBRARY_FILE = path.join(LIBRARY_DIR, 'library.json');
 
 function ensureLibrary() {
   if (!fs.existsSync(LIBRARY_DIR)) fs.mkdirSync(LIBRARY_DIR, { recursive: true });
@@ -38,8 +58,41 @@ function bookDir(bookId) {
 // kept out of library.json so the renderer's library writes can't clobber it.
 //   .bookfolders.json: { "book-abc": "The Scum Kings - Jake" }
 // ---------------------------------------------------------------------------
-const BOOK_FOLDERS_FILE = path.join(LIBRARY_DIR, '.bookfolders.json');
+let BOOK_FOLDERS_FILE = path.join(LIBRARY_DIR, '.bookfolders.json');
 let _bfCache = { mtimeMs: -1, data: {} };
+
+// Repoint every library-derived path after the user moves the library.
+function applyLibraryDir(dir) {
+  LIBRARY_DIR = dir;
+  LIBRARY_FILE = path.join(dir, 'library.json');
+  BOOK_FOLDERS_FILE = path.join(dir, '.bookfolders.json');
+  _bfCache = { mtimeMs: -1, data: {} }; // cache belonged to the old dir — force a reread
+}
+
+// Move the whole library folder to a new location, keeping every file. Fast path
+// is a rename (same volume); across volumes it copies then removes the original.
+function moveLibrary(from, to) {
+  const fromR = path.resolve(from);
+  const toR = path.resolve(to);
+  if (fromR === toR) return;
+  const rel = path.relative(fromR, toR);
+  if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+    throw new Error('Can’t put the library inside itself — choose a different folder.');
+  }
+  if (fs.existsSync(toR) && fs.readdirSync(toR).length) {
+    throw new Error('That folder already contains files. Choose an empty or new folder.');
+  }
+  if (!fs.existsSync(fromR)) { fs.mkdirSync(toR, { recursive: true }); return; } // nothing to move yet
+  fs.mkdirSync(path.dirname(toR), { recursive: true });
+  try {
+    fs.renameSync(fromR, toR);
+  } catch (err) {
+    if (err.code === 'EXDEV') {            // different volume: copy across, then drop the original
+      fs.cpSync(fromR, toR, { recursive: true });
+      fs.rmSync(fromR, { recursive: true, force: true });
+    } else { throw err; }
+  }
+}
 
 function readBookFolders() {
   try {
@@ -240,7 +293,11 @@ function safeBase(name) {
 // (its "Book #"), chapters are named "{book}.{episode} Title" — e.g. a Book 7
 // gives "7.01 Title", "7.02 Title" — matching a podcast season.episode scheme.
 function chapterBase(i, title, seriesNumber) {
-  const t = safeBase(title);
+  // A title sometimes already carries an ordering prefix (e.g. an imported
+  // "7.09 Foo"); strip it so the numeric prefix we add below can't double it
+  // into "7.09 7.09 Foo". stripOrderingPrefix leaves real titles ("1984") alone.
+  let t = safeBase(title);
+  if (t) t = stripOrderingPrefix(t);
   const season = Number(seriesNumber);
   if (Number.isFinite(season) && season > 0) {
     const ep = String(i + 1).padStart(2, '0');
@@ -372,6 +429,39 @@ ipcMain.handle('book:delete', async (_e, bookId, title) => {
 });
 
 ipcMain.handle('library:path', () => LIBRARY_DIR);
+
+// Reveal the library folder in Finder.
+ipcMain.handle('library:reveal', () => {
+  try { ensureLibrary(); shell.openPath(LIBRARY_DIR); } catch (err) { logError('library-reveal', err); }
+  return true;
+});
+
+// Pick a new home for the library and move it there. A tip in the dialog steers
+// users away from ~/Documents (and Desktop/Downloads) so macOS stops prompting.
+ipcMain.handle('library:pick', async () => {
+  const win = BrowserWindow.getFocusedWindow();
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: 'Choose a folder for your NEO library',
+    message: 'Your books move here and NEO uses it from now on. Tip: a spot outside Documents, Desktop and Downloads avoids macOS permission prompts.',
+    buttonLabel: 'Use This Folder',
+    properties: ['openDirectory', 'createDirectory']
+  });
+  if (canceled || !filePaths.length) return { canceled: true };
+  // Drop the library into the chosen folder as "NEO Library" unless they pointed
+  // straight at such a folder (so we never nest "NEO Library/NEO Library").
+  let target = filePaths[0];
+  if (path.basename(target) !== 'NEO Library') target = path.join(target, 'NEO Library');
+  if (path.resolve(target) === path.resolve(LIBRARY_DIR)) return { unchanged: true, path: LIBRARY_DIR };
+  try {
+    moveLibrary(LIBRARY_DIR, target);
+  } catch (err) {
+    logError('library-move', err);
+    return { error: String(err.message || err) };
+  }
+  applyLibraryDir(target);
+  writeConfig({ libraryDir: target });
+  return { path: target };
+});
 
 // ---------------------------------------------------------------------------
 // Fullscreen + The Silo
@@ -713,7 +803,9 @@ function scrivDocToChapter(scrivDir, uuid, title) {
     const rtf = fs.readFileSync(path.join(scrivDir, 'Files', 'Data', uuid, 'content.rtf'), 'latin1');
     paras = rtfToParagraphs(rtf).map((t) => (isSceneBreak(t) ? { scene: true } : { text: t }));
   } catch { /* empty/missing document */ }
-  return { title: title || 'Untitled', paras: paras.length ? paras : [{ text: '' }] };
+  // Match fileAsChapter: drop a leading ordering prefix from the binder title
+  // ("7.01 Foo" -> "Foo") — NEO numbers chapters itself, so it is noise here.
+  return { title: stripOrderingPrefix(title || 'Untitled'), paras: paras.length ? paras : [{ text: '' }] };
 }
 
 // Build the binder as a nested tree of { uuid, type, title, children }.
@@ -1003,6 +1095,7 @@ function buildMenu() {
           accelerator: 'CmdOrCtrl+,',
           click: () => sendToWindow({ type: 'stats' })
         },
+        { label: 'Library Location…', click: () => sendToWindow({ type: 'libraryLocation' }) },
         { type: 'separator' },
         {
           label: 'Import Manuscripts…',

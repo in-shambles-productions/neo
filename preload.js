@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('neo', {
   readLibrary: () => ipcRenderer.invoke('library:read'),
   writeLibrary: (data) => ipcRenderer.invoke('library:write', data),
   libraryPath: () => ipcRenderer.invoke('library:path'),
+  pickLibrary: () => ipcRenderer.invoke('library:pick'),
+  revealLibrary: () => ipcRenderer.invoke('library:reveal'),
 
   createBook: (meta) => ipcRenderer.invoke('book:create', meta),
   readBookMeta: (bookId) => ipcRenderer.invoke('book:readMeta', bookId),

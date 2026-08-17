@@ -16,6 +16,12 @@ NEO keeps your books as plain files. This fork names them so you — and other a
 - Chapters become `007 - The Dragon.html`, renamed as you retitle or reorder
 - Right-click a chapter → **Reveal in Finder**; deletes go to the Trash, never gone
 
+### Your library, anywhere you like
+
+Your whole library is just a folder — and now you choose where it sits. Open **Goals & Settings** (⌘,) → **Library folder → Move…**, or **File → Library Location…**, pick a spot, and NEO moves every book there and remembers it. **Show in Finder** opens it any time.
+
+Keeping the library outside **Documents**, **Desktop**, and **Downloads** — say in your home folder, Dropbox, or an external drive — also stops macOS from repeatedly asking an unsigned build for folder access.
+
 ### Series-aware naming
 
 Give a book its number in a series, and every chapter names itself `series.chapter — title`:
