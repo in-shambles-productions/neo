@@ -4,7 +4,6 @@ node_modules/
 # build output
 dist/
 build/icon-candidates/
-build/icon.png
 
 # private writing samples (Scrivener projects, manuscripts) — never publish
 docs/

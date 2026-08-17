@@ -1,0 +1,44 @@
+name: Build Windows installer
+
+# Cross-building the NSIS installer under Wine on macOS is unreliable, so the
+# Windows build runs here on a native Windows runner and attaches the .exe to an
+# existing release. Trigger it by hand from the Actions tab (or with
+# `gh workflow run windows-build.yml -f tag=vX.Y.Z`).
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the Windows installer to
+        default: v0.2.2
+        required: true
+
+permissions:
+  contents: write   # lets the job upload the installer to the release
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      # --publish never keeps electron-builder from auto-pushing to the upstream
+      # repo named in package.json's "publish" block; we upload it ourselves below.
+      - name: Build the Windows installer (unsigned)
+        run: npx electron-builder --win --publish never
+
+      - name: Upload the installer to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Built:"; ls -la dist/*.exe
+          gh release upload "${{ github.event.inputs.tag }}" dist/*.exe --clobber
