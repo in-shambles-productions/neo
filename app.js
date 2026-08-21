@@ -1643,6 +1643,10 @@ function updateCounters() {
     const idx = book.chapterOrder.indexOf(currentChapterId);
     wc.textContent = `ch. ${idx + 1}: ${n.toLocaleString()} words`;
   }
+  const cc = $('#chapter-counter');
+  cc.textContent = book.chapterOrder.includes(currentChapterId)
+    ? `${chapterWords(currentChapterId).toLocaleString()} this chapter`
+    : '';
   const pos = $('#pos-counter');
   const idx = book.chapterOrder.indexOf(currentChapterId);
   pos.textContent = idx >= 0

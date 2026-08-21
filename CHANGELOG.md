@@ -2,6 +2,14 @@
 
 Notable changes to this fork of NEO.
 
+## 0.2.3 — 2026-08-21
+
+### Added
+- **Current-chapter word count.** The bottom status bar now shows a live
+  "*N* this chapter" counter beside the daily "today" total, so you can see how
+  long the chapter you're writing in is at a glance. It updates as you type and
+  follows the caret from chapter to chapter.
+
 ## 0.2.2 — 2026-08-17
 
 ### Fixed
