@@ -39,6 +39,10 @@ Perfect for anything that reads ordered files.
 - **Files or a folder → chapters.** One chapter per file, sorted by name, with leading order numbers (`7.01 `, `01 - `, `Chapter 3 - `) trimmed from the title automatically.
 - **Scrivener projects.** Open a `.scriv` and a preview lets you map each part of the binder to _new book_, _notes_, or _skip_. A multi-book Draft splits into numbered books, Research becomes Notes, and the RTF is converted to clean prose — smart quotes, em dashes, and scene breaks intact.
 
+### Live chapter word count
+
+The status bar keeps a running count of the chapter you're writing in, right beside your total for today — so you always know how long the current chapter is running.
+
 ### A custom icon
 
 A letterpress drop-cap **N**.
