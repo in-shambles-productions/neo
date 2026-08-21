@@ -9,7 +9,7 @@ on:
     inputs:
       tag:
         description: Release tag to attach the Windows installer to
-        default: v0.2.2
+        default: v0.2.4
         required: true
 
 permissions:
@@ -40,5 +40,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Built:"; ls -la dist/*.exe
-          gh release upload "${{ github.event.inputs.tag }}" dist/*.exe --clobber
+          echo "Built:"; ls -la dist/*.exe dist/latest.yml
+          # latest.yml is electron-updater's Windows feed — without it the
+          # in-app updater can't resolve a version from this release.
+          gh release upload "${{ github.event.inputs.tag }}" dist/*.exe dist/latest.yml --clobber
