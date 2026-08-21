@@ -1066,9 +1066,13 @@ function sendToWindow(msg) {
 }
 
 function buildMenu() {
+  const isMac = process.platform === 'darwin';
   const bodyFonts = ['Georgia', 'Palatino', 'Baskerville', 'Hoefler Text', 'Iowan Old Style'];
   const template = [
-    { role: 'appMenu' },
+    // appMenu is a macOS-only role; on Windows/Linux it throws inside
+    // Menu.buildFromTemplate. Because buildMenu() ran before the window was
+    // created, that throw left the app running with no window at all.
+    ...(isMac ? [{ role: 'appMenu' }] : []),
     {
       label: 'File',
       submenu: [
@@ -1106,7 +1110,7 @@ function buildMenu() {
         { label: 'Import Folder as Chapters…', click: () => sendToWindow({ type: 'importChapters', mode: 'folder' }) },
         { label: 'Import Scrivener Project…', click: () => sendToWindow({ type: 'importScrivener' }) },
         { type: 'separator' },
-        { role: 'close' }
+        ...(isMac ? [{ role: 'close' }] : [{ role: 'quit' }])
       ]
     },
     {
@@ -1174,7 +1178,13 @@ function buildMenu() {
           accelerator: 'CmdOrCtrl+Shift+F',
           click: () => {
             const w = BrowserWindow.getFocusedWindow();
-            if (w && !w.isSimpleFullScreen()) w.setFullScreen(!w.isFullScreen());
+            if (!w) return;
+            // isSimpleFullScreen is macOS-only; the Silo is kiosk mode on every
+            // platform, so key off that to avoid fighting it here.
+            const inSilo = process.platform === 'darwin'
+              ? w.isSimpleFullScreen() || w.isKiosk()
+              : w.isKiosk();
+            if (!inSilo) w.setFullScreen(!w.isFullScreen());
           }
         },
         {
@@ -1239,11 +1249,19 @@ app.whenReady().then(() => {
       logError('prefs', err);
     }
   }
-  ensureLibrary();
-  buildMenu();
-  createWindow();
-  dailyBackup();
-  checkForUpdates();
+  try {
+    try { ensureLibrary(); } catch (err) { logError('library', err); }
+    createWindow();                 // window first — a later throw must never leave us windowless
+    try { buildMenu(); } catch (err) { logError('menu', err); }
+    try { dailyBackup(); } catch (err) { logError('backup', err); }
+    try { checkForUpdates(); } catch (err) { logError('updater', err); }
+  } catch (err) {
+    logError('startup', err);
+    try {
+      dialog.showErrorBox('NEO failed to start',
+        'Please report this at github.com/in-shambles-productions/neo/issues:\n\n' + String((err && err.stack) || err));
+    } catch { /* nothing left to try */ }
+  }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

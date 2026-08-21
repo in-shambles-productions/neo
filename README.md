@@ -1,10 +1,10 @@
 <div align="center">
   <img src="assets/icon.png" width="120" alt="NEO">
   <h1>NEO</h1>
-  <p><strong>A distraction-free word processor for authors</strong><br>forked to make your files first-class on disk and to import your work from anywhere.</p>
+  <p><strong>A distraction-free word processor for authors</strong><br>an independent fork of Hugh Howey's NEO, with its own direction.</p>
 </div>
 
-A fork of [NEO](https://github.com/hughhowey/neo) by Hugh Howey — the same quiet, book-first writing experience, with readable files, series tooling, and importers layered on top. MIT-licensed, like the original.
+An **independent fork** of [NEO](https://github.com/hughhowey/neo) by Hugh Howey. It keeps the original's quiet, book-first writing experience and adds readable files on disk, series tooling, and importers — now on its own roadmap rather than tracking upstream for parity. Good fixes are still borrowed from the original where they fit; the direction is its own. MIT-licensed, like the original.
 
 ## Highlights
 
@@ -66,4 +66,4 @@ Package it yourself with `npm run package` (macOS) or `npm run package:win` (Win
 
 ## Credits
 
-Built on [NEO](https://github.com/hughhowey/neo) by Hugh Howey. The original and this fork are both [MIT](LICENSE) licensed. Now go write.
+Built on — and endlessly grateful to — [NEO](https://github.com/hughhowey/neo) by Hugh Howey. His NEO is a personal writing engine, generously shared; this fork has since taken its own path from it. Both are [MIT](LICENSE) licensed. Now go write.

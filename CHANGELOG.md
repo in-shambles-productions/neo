@@ -2,6 +2,33 @@
 
 Notable changes to this fork of NEO.
 
+## 0.2.4 — 2026-08-21
+
+NEO is now maintained as an **independent fork** — free to borrow good fixes from
+upstream without chasing feature parity. This release ports several fixes across
+from Hugh Howey's line and stops the fork from trying to update itself into it.
+
+### Fixed
+- **Windows builds open a window again.** Startup built the macOS-only `appMenu`
+  before creating the window, with no error handling, so on Windows the whole app
+  launched invisibly. The menu is now platform-gated and the window is created
+  first, inside a guarded startup.
+- **No more duplicated characters** when you Backspace or Delete right beside a
+  placeholder mark or a darling anchor — a Chromium quirk, now handled by doing
+  that single-character delete by hand.
+- **Tab stays in the manuscript.** Tab inserts two spaces (Shift+Tab removes
+  them) instead of yanking focus out to the toolbar.
+- **Backspace clears an empty chapter.** Pressing Backspace in a chapter you've
+  just emptied removes it and drops you at the end of the previous one, instead
+  of stranding an empty shell.
+
+### Changed
+- **Cross-platform shortcut labels.** The hint bar and shortcuts panel now show
+  `Ctrl` on Windows and Linux, and `⌘` only on macOS.
+- **Updates come from this fork.** The in-app updater pointed at the upstream
+  repository, which could have quietly replaced your build with upstream's. It
+  now tracks this fork's own releases.
+
 ## 0.2.3 — 2026-08-21
 
 ### Added

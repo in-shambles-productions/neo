@@ -18,6 +18,14 @@ let hintShown = false;
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
+// Shortcut glyphs read ⌘/⇧ on macOS and Ctrl/Shift on Windows & Linux, so the
+// hints and help panel match the keys you actually press. K(mac, pc) picks one.
+const IS_MAC = navigator.platform.toLowerCase().includes('mac');
+const K = (mac, pc) => (IS_MAC ? mac : pc);
+const KZ = K('⌘Z', 'Ctrl+Z');
+const KPH = K('⌘⇧X', 'Ctrl+Shift+X');
+const KDA = K('⌘⇧D', 'Ctrl+Shift+D');
+
 // ---------- tiny modal helper (Electron has no window.prompt) ----------
 function askInput(title, placeholder, value = '') {
   return new Promise((resolve) => {
@@ -517,7 +525,7 @@ async function openBook(bookId) {
 
   if (!hintShown) {
     hintShown = true;
-    setTimeout(() => toast('Enter twice = section break · three times = new chapter · ⌘/ shows everything else', 7000), 800);
+    setTimeout(() => toast(`Enter twice = section break · three times = new chapter · ${K('⌘/', 'Ctrl+/')} shows everything else`, 7000), 800);
   }
 }
 
@@ -596,7 +604,7 @@ async function deleteChapterToDarlings(chId) {
   }
   if (currentChapterId === chId) currentChapterId = null;
   await deleteChapterQuiet(chId);
-  if (text) toast('Chapter removed — its words are in Darlings, or ⌘Z to undo');
+  if (text) toast(`Chapter removed — its words are in Darlings, or ${KZ} to undo`);
 }
 
 async function chapterMenu(chId, index) {
@@ -650,7 +658,10 @@ function wireChapterBody(body, chId) {
   body.addEventListener('compositionend', () => { composing = false; });
   body.addEventListener('keydown', (e) => {
     if (composing || e.isComposing || e.keyCode === 229) return;
+    if (guardMarkerDelete(e, body, chId)) return;
+    if (emptyChapterBackspace(e, body, chId)) return;
     if (handleEnter(e, body, chId)) return;
+    if (handleTabSpacing(e)) return;
     smartKeys(e, body);
   });
   body.addEventListener('click', (e) => {
@@ -723,6 +734,88 @@ function handleEnter(e, body, chId) {
     return true;
   }
   return false;
+}
+
+// Chromium duplicates a neighbouring character when you Backspace/Delete right
+// beside a contentEditable=false marker (the "?" placeholder or a darling
+// anchor). Do the single-character delete by hand so the engine can't.
+function guardMarkerDelete(e, body, chId) {
+  if (e.key !== 'Backspace' && e.key !== 'Delete') return false;
+  if (e.metaKey || e.ctrlKey || e.altKey) return false;
+  const sel = window.getSelection();
+  if (!sel.rangeCount || !sel.isCollapsed) return false;
+  const r = sel.getRangeAt(0);
+  const node = r.startContainer;
+  if (node.nodeType !== Node.TEXT_NODE) return false;
+  const back = e.key === 'Backspace';
+  // only step in when the char being deleted exists in this text node
+  if (back ? r.startOffset === 0 : r.startOffset >= node.textContent.length) return false;
+  // ...and the text node touches a non-editable marker
+  const isMark = (n) => n && n.nodeType === Node.ELEMENT_NODE &&
+    (n.classList.contains('ph-mark') || n.classList.contains('darling-anchor'));
+  if (!isMark(node.previousSibling) && !isMark(node.nextSibling)) return false;
+
+  e.preventDefault();
+  const del = document.createRange();
+  if (back) {
+    del.setStart(node, r.startOffset - 1);
+    del.setEnd(node, r.startOffset);
+  } else {
+    del.setStart(node, r.startOffset);
+    del.setEnd(node, r.startOffset + 1);
+  }
+  del.deleteContents();
+  const caret = document.createRange();
+  caret.setStart(node, back ? r.startOffset - 1 : r.startOffset);
+  caret.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(caret);
+  syncChapter(body, chId);
+  return true;
+}
+
+// Backspace at the very start of an emptied chapter removes the chapter and
+// hops to the end of the previous one, instead of stranding an empty shell
+// (e.g. after an accidental Enter×3).
+function emptyChapterBackspace(e, body, chId) {
+  if (e.key !== 'Backspace' || e.metaKey || e.ctrlKey || e.altKey) return false;
+  if (body.innerText.trim() !== '') return false; // ghosts count as content
+  const idx = book.chapterOrder.indexOf(chId);
+  if (idx <= 0 || book.chapterOrder.length < 2) return false;
+  e.preventDefault();
+  snapshotStructure('empty chapter removed');
+  const prev = book.chapterOrder[idx - 1];
+  deleteChapterQuiet(chId).then(() => focusChapter(prev));
+  return true;
+}
+
+// Tab inserts two spaces rather than escaping the editor to the chrome;
+// Shift+Tab removes up to two. Manuscripts don't use real tab stops.
+function handleTabSpacing(e) {
+  if (e.key !== 'Tab' || e.metaKey || e.ctrlKey || e.altKey) return false;
+  e.preventDefault();
+  if (!e.shiftKey) {
+    document.execCommand('insertText', false, '  ');
+    return true;
+  }
+  // Shift+Tab: remove up to two preceding spaces
+  const sel = window.getSelection();
+  if (sel.rangeCount && sel.isCollapsed) {
+    const r = sel.getRangeAt(0);
+    const node = r.startContainer;
+    if (node.nodeType === Node.TEXT_NODE) {
+      let n = 0;
+      while (n < 2 && r.startOffset - n > 0 &&
+             node.textContent[r.startOffset - n - 1] === ' ') n++;
+      if (n > 0) {
+        const del = document.createRange();
+        del.setStart(node, r.startOffset - n);
+        del.setEnd(node, r.startOffset);
+        del.deleteContents();
+      }
+    }
+  }
+  return true;
 }
 
 function syncChapter(body, chId) {
@@ -915,7 +1008,7 @@ function insertPlaceholder() {
   if (el && el.nodeType === Node.TEXT_NODE) el = el.parentElement;
   const bodyEl = el && el.closest ? el.closest('.chapter-body') : null;
   if (!bodyEl) {
-    toast('Click into a chapter first, then ⌘⇧X drops a placeholder');
+    toast(`Click into a chapter first, then ${KPH} drops a placeholder`);
     return;
   }
   currentChapterId = bodyEl.closest('.chapter').dataset.id;
@@ -951,7 +1044,7 @@ function renderStickies() {
   wrap.innerHTML = '';
   const open = stickies.filter((s) => !s.resolved);
   if (open.length === 0) {
-    wrap.innerHTML = `<div class="stickies-empty">No notes yet.<br><br>Hit ⌘⇧X while writing to drop a placeholder — a “come back to this” mark that never breaks your flow.</div>`;
+    wrap.innerHTML = `<div class="stickies-empty">No notes yet.<br><br>Hit ${KPH} while writing to drop a placeholder — a “come back to this” mark that never breaks your flow.</div>`;
     return;
   }
   for (const s of open) {
@@ -1117,7 +1210,7 @@ navList.addEventListener('drop', async (e) => {
   renderChapters(); // renumbers heads and rebuilds the nav
   scheduleReconcile(); // renumber the files on disk to match the new order
   if (currentTab === 'outline') renderOutline();
-  toast('Chapters reordered — ⌘Z to undo');
+  toast(`Chapters reordered — ${KZ} to undo`);
 });
 
 function highlightNav() {
@@ -1236,14 +1329,14 @@ async function moveSelectionToDarlings(html, text) {
   });
   await window.neo.writeJSON(book.id, 'darlings', darlings);
   updateCounters();
-  toast('Saved to Darlings — kill without remorse (⌘Z to undo)');
+  toast(`Saved to Darlings — kill without remorse (${KZ} to undo)`);
 }
 
 // keyboard route: select a passage, ⌘⇧D, keep writing
 function darlingFromKeyboard() {
   const sel = window.getSelection();
   if (!sel.rangeCount || sel.isCollapsed) {
-    toast('Select the passage first, then ⌘⇧D sends it to Darlings');
+    toast(`Select the passage first, then ${KDA} sends it to Darlings`);
     return;
   }
   let el = sel.anchorNode;
@@ -2022,7 +2115,7 @@ function replaceAllMatches() {
     if (touched) syncChapter(body, chId);
   }
   if (n === 0) undoStack.pop(); // nothing changed, nothing to undo
-  toast(n ? `${n} replaced across the whole book — ⌘Z to undo` : '0 replaced');
+  toast(n ? `${n} replaced across the whole book — ${KZ} to undo` : '0 replaced');
   runSearch();
 }
 
@@ -2270,7 +2363,7 @@ function toggleSpellcheck() {
   const active = document.activeElement;
   if (active && active.blur) { active.blur(); if (active.focus) active.focus(); }
   toast(spellOn
-    ? 'Spellcheck pass ON — right-click any squiggle for suggestions. ⌘; again when you’re done.'
+    ? `Spellcheck pass ON — right-click any squiggle for suggestions. ${K('⌘;', 'Ctrl+;')} again when you’re done.`
     : 'Spellcheck off. Back to flow.', 5000);
 }
 
@@ -2595,32 +2688,32 @@ function showHelp() {
       <div class="help-grid">
         ${row('Enter ×2', 'Section break (***)')}
         ${row('Enter ×3', 'New chapter, auto-numbered')}
-        ${row('⌘⇧X', 'Placeholder note — mark it, keep writing')}
-        ${row('⌘⇧D', 'Send the selected passage to Darlings')}
-        ${row('⌘Z', 'Undo big moves (chapter deletes, replace-all, darlings) when not mid-typing')}
+        ${row(KPH, 'Placeholder note — mark it, keep writing')}
+        ${row(KDA, 'Send the selected passage to Darlings')}
+        ${row(KZ, 'Undo big moves (chapter deletes, replace-all, darlings) when not mid-typing')}
         ${row('-- and ...', 'Become an em dash — and a true ellipsis …')}
-        ${row('⌘B · ⌘I', 'Bold, italic. Quotes curl themselves.')}
+        ${row(K('⌘B · ⌘I', 'Ctrl+B · Ctrl+I'), 'Bold, italic. Quotes curl themselves.')}
       </div>
 
       <div class="help-sec">Getting around</div>
       <div class="help-grid">
-        ${row('⌘F', 'Find &amp; replace across the whole book')}
+        ${row(K('⌘F', 'Ctrl+F'), 'Find &amp; replace across the whole book')}
         ${row('Hover edges', 'Left: chapters &amp; outline notes. Right: comments (☉ pins).')}
         ${row('Esc', 'Closes whatever’s open; otherwise back to the shelf')}
       </div>
 
       <div class="help-sec">Modes</div>
       <div class="help-grid">
-        ${row('⌘⇧F', 'Full screen (Esc leaves)')}
-        ${row('⌘⇧S', 'The Silo — write your way out')}
-        ${row('⌘⇧T', 'Typewriter scrolling')}
-        ${row('⌘;', 'Spellcheck pass (right-click squiggles for fixes)')}
+        ${row(K('⌘⇧F', 'Ctrl+Shift+F'), 'Full screen (Esc leaves)')}
+        ${row(K('⌘⇧S', 'Ctrl+Shift+S'), 'The Silo — write your way out')}
+        ${row(K('⌘⇧T', 'Ctrl+Shift+T'), 'Typewriter scrolling')}
+        ${row(K('⌘;', 'Ctrl+;'), 'Spellcheck pass (right-click squiggles for fixes)')}
       </div>
 
       <div class="help-sec">Files</div>
       <div class="help-grid">
-        ${row('⌘E', 'Email a timestamped draft to yourself')}
-        ${row('⌘⇧I', 'Import .docx / .txt / .md manuscripts')}
+        ${row(K('⌘E', 'Ctrl+E'), 'Email a timestamped draft to yourself')}
+        ${row(K('⌘⇧I', 'Ctrl+Shift+I'), 'Import .docx / .txt / .md manuscripts')}
         ${row('File → Export', 'txt · md · html · pdf · docx · epub')}
       </div>
 
